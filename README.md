@@ -19,7 +19,7 @@ docker compose exec -T backend python -m scripts.seed_demo
 |---|---|---|
 |admin@qise.test|admin 主管|全部录入、计算、确认、最终签批|
 |colorist@qise.test|colorist 调色师|配方/染样录入、PCA、试验与色差确认，不能最终批准|
-|viewer@qise.test|viewer 观察员|九页与审计记录只读|
+|viewer@qise.test|viewer 观察员|十页与审计记录只读|
 
 演示密码均为 `Dye2026!`。JWT 有效期 8 小时；所有变更通过后端鉴权。数据库密码与 JWT 默认密钥为本地演示配置。
 
@@ -49,7 +49,7 @@ Python 3.12 / FastAPI / SQLAlchemy / PostgreSQL16 / Redis7 / scikit-learn1.6；�
 
 `backend/src/models.py` 定义领域模型；`schemas.py` 校验输入；`recipe_service.py` 承担领域规则和审计；`app.py` 路由及两道中间件；`atlas.py` 纯 Python ML；`worker.py` 消费队列、记录心跳；`backend/scripts/seed_demo.py` 幂等数据。首次启动 SQLAlchemy metadata 建表，本小型项目不含后续在线迁移工具。
 
-前端 `src/api.js` API、`store.js` 状态、`utils.js` 格式与反馈、`components/common.js` 标题/状态/光谱/证据表、`pages/` 九个业务页面。角色与试验状态枚举分别位于 `backend/src/constants.py` 与 `frontend/src/constants.js`。
+前端 `src/api.js` API、`store.js` 状态、`utils.js` 格式与反馈、`components/common.js` 标题/状态/光谱/证据表、`pages/` 十个业务页面。角色与试验状态枚举分别位于 `backend/src/constants.py` 与 `frontend/src/constants.js`。
 
 本地后端：创建 Python3.12 venv，安装 `backend/requirements.txt`，设置 DATABASE_URL/REDIS_URL 指向映射端口，进入 backend 运行 `uvicorn src.app:app --reload`；worker 同目录运行 `python -m src.worker`（本地 `/artifacts` 路径需有写权限）。本地前端可经现成 Nginx 容器开发，修改后 compose build frontend。
 
@@ -95,3 +95,25 @@ Seed再补5个染料批次：A80kg、B40kg、C20kg可用，C隔离5kg、B已过�
 续篇剧本：为200kg靛蓝缸称A3.6/B0.8/C0.4kg→色差实测合格并签放→禾里服装收样，林工签收后记录标准光源色差争议→申请100kg补染→主管批准→新试验关联新缸，称A1.6/B0.4/C0.2kg→新缸正常实测签放→主管关闭客诉。新库存、客户与补染证据独立归档`test-artifacts/gb-1021/v3/`。
 
 限制：库存仅染料批次扣料，不包含采购、货位、退库与盘点；客户运单和签收为本地人工凭据，未调用物流或客户门户。补染不出款、不改旧发样结论，不含合同索赔金额。Lab、光谱和工艺门限仍为模拟业务，需真实仪器及客户容差规范校准。
+
+
+## V4：排产换色判定与清洗凭据
+
+新增第十页“排产换色判定”。深色缸接浅色缸容易串色，系统用同机历次免洗换色的前后配方与首测色差预测免洗超差风险，证据不足一律要求清洗。
+
+- **历史换色证据池**：`ColorChangeRecord` 保存染机、前后配方浓度快照、是否免洗与首测 ΔE；人工登记与完工自动生成两条来源。只有免洗记录进入证据池，清洗记录仅留档。
+- **换色判定**：排产/插单即按当前前缸自动判定。同机免洗记录中前后配方浓度距离（A/B/C 欧氏距离 ≤0.8）均匹配的 ≥2 条且首测 ΔE 全部 ≤3，判“免洗可行”并按染机留出首测检验；证据不足或历史超差，判“要求清洗”。判定依据（证据明细、配方距离、浓度合计、判定时间）整份存入缸次 `judgment` 供回看。
+- **开染规则**：仅本机队列最前的待排缸可开染，且上缸须已完工；开染以同机实际完工的上一缸为准核对判定。要求清洗的缸必须持有有效清洗凭据（主管确认）才能开染，凭据在开染事务内核销。
+- **改排与插单**：凭据只对登记时的前后两缸有效；插单或改排改变相邻关系，受影响凭据同事务失效，相关缸次判定过期，重算前拦截开染。改排与开染并发时以缸次行锁定序：先开染的缸留在原机（改排拒绝），先改排则按新顺序重算判定后才能开染。
+- **幂等开染**：开染请求携带 `request_key`，写入中断后用同一 key 重试直接返回原结果，不重复核销清洗凭据；换 key 重复开染拒绝。
+- **回看**：排产、判定、改排、确认清洗、凭据失效、开染、拦截、完工全部写入 `schedule_events`，页面按缸次展开判定依据与拦截原因。
+
+新实体：`DyeMachine`、`ScheduleSlot`（机台队列、配方快照、判定 JSON、检验预留、开染幂等键）、`ColorChangeRecord`、`CleaningVoucher`（前后缸对、有效/已核销/已失效）、`ScheduleEvent`。代码位于 `schedule_models.py`、`schedule_schemas.py`、`schedule_service.py`、`schedule_routes.py`，前端新页 `pages/schedule.js`。
+
+接口：`GET /schedule/machines|slots|history|vouchers|events`，`POST /schedule/slots`、`POST /schedule/slots/{id}/reschedule|rejudge|start|complete`，`POST /schedule/history`，`POST /schedule/vouchers`（主管）。完工登记首测 ΔE 自动生成换色记录回流证据池。
+
+Seed 新增 M1/M2/M3 三台染机、5 条历史换色（含免洗合格、免洗超差与已清洗样本）与 M1 队列：Q-1101 已完工、Q-1102 免洗可行留出检验、Q-1103 证据不足要求清洗；重复 seed 只补缺项。
+
+演示剧本：Q-1102 免洗开染（同 key 重试安全返回）→完工生成免洗记录→Q-1103 缺凭据被拦截→主管确认清洗→插单 Q-INS4 凭据即失效、判定过期→重算前开染被拦→插单缸洗完开工→Q-1103 重算、重新确认清洗、凭据开染→登记两条 DY-023→DY-021 免洗记录后新排缸次判定翻转为免洗。
+
+限制：判定规则为模拟工艺门限（容差 0.8、证据 2 条、ΔE 3），未接入真实机台状态与检验仪器；队列为单机单缸模型，不含并行缸与计划排程优化。

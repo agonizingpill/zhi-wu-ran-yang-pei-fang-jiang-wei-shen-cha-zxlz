@@ -13,6 +13,7 @@ from .auth import current,editor,admin,hash_password,issue
 from . import recipe_service as svc
 from .production_routes import router as production_router
 from .fulfillment_routes import router as fulfillment_router
+from .schedule_routes import router as schedule_router
 queue=redis.Redis.from_url(os.getenv('REDIS_URL','redis://redis:6379/0'),decode_responses=True)
 @asynccontextmanager
 async def lifespan(app):
@@ -26,6 +27,7 @@ async def lifespan(app):
 app=FastAPI(title='栖色染样图谱',lifespan=lifespan)
 app.include_router(production_router)
 app.include_router(fulfillment_router)
+app.include_router(schedule_router)
 app.add_middleware(CORSMiddleware,allow_origins=['http://localhost:18220'],allow_methods=['*'],allow_headers=['*'])
 @app.middleware('http')
 async def request_trace(request:Request,call_next):
